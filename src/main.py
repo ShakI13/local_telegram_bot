@@ -28,7 +28,11 @@ def main() -> None:
         settings.ollama_model,
         base_url=settings.ollama_base_url,
     )
-    Orchestrator(channel, inference).run()
+    Orchestrator(
+        channel,
+        inference,
+        allowed_chat_ids=settings.telegram_allowed_chat_ids,
+    ).run()
 
 
 if __name__ == "__main__":

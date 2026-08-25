@@ -53,6 +53,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.telegram_bot_token, "test-token")
         self.assertEqual(settings.ollama_base_url, "http://127.0.0.1:11434")
         self.assertEqual(settings.ollama_model, "qwen3:1.7b")
+        self.assertEqual(settings.telegram_allowed_chat_ids, frozenset())
 
     def test_load_settings_custom_ollama(self) -> None:
         env = {
@@ -64,6 +65,17 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings(env_file=None)
         self.assertEqual(settings.ollama_base_url, "http://localhost:11434")
         self.assertEqual(settings.ollama_model, "tinyllama")
+
+    def test_load_settings_allowed_chat_ids(self) -> None:
+        env = {
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_ALLOWED_CHAT_IDS": " 111, 222 ,333 ",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            settings = load_settings(env_file=None)
+        self.assertEqual(
+            settings.telegram_allowed_chat_ids, frozenset({"111", "222", "333"})
+        )
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -114,6 +126,34 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(handled, 2)
         self.assertEqual(channel.sent, [(2, "fine")])
+
+    def test_allowlist_ignores_other_chats(self) -> None:
+        channel = FakeChannel(
+            [
+                InboundMessage(chat_id=111, text="ok"),
+                InboundMessage(chat_id=999, text="nope"),
+            ]
+        )
+        inference = FakeInference(reply="pong")
+        orch = Orchestrator(
+            channel, inference, allowed_chat_ids=frozenset({"111"})
+        )
+
+        with self.assertLogs("src.orchestrator", level="WARNING"):
+            orch.run_once()
+
+        self.assertEqual(inference.prompts, ["ok"])
+        self.assertEqual(channel.sent, [(111, "pong")])
+
+    def test_empty_allowlist_allows_all(self) -> None:
+        channel = FakeChannel([InboundMessage(chat_id=42, text="hi")])
+        inference = FakeInference(reply="pong")
+        orch = Orchestrator(channel, inference, allowed_chat_ids=frozenset())
+
+        orch.run_once()
+
+        self.assertEqual(inference.prompts, ["hi"])
+        self.assertEqual(channel.sent, [(42, "pong")])
 
 
 class TelegramChannelTests(unittest.TestCase):
