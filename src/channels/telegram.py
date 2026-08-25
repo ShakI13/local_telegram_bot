@@ -1,0 +1,117 @@
+"""Telegram Bot API channel via stdlib HTTPS (long polling)."""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+from .base import InboundMessage
+
+
+class TelegramChannel:
+    """Long-polling Telegram channel (`getUpdates` / `sendMessage`)."""
+
+    def __init__(
+        self,
+        token: str,
+        *,
+        poll_timeout: int = 25,
+        api_base: str = "https://api.telegram.org",
+    ) -> None:
+        if not token:
+            raise ValueError("Telegram bot token is required")
+        self._token = token
+        self._poll_timeout = poll_timeout
+        self._api_base = api_base.rstrip("/")
+        self._offset: int | None = None
+
+    def _url(self, method: str) -> str:
+        return f"{self._api_base}/bot{self._token}/{method}"
+
+    def _request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        url = self._url(method)
+        data = None
+        headers = {"Accept": "application/json"}
+        if params is not None:
+            body = json.dumps(params).encode("utf-8")
+            data = body
+            headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        else:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+
+        wait = timeout if timeout is not None else max(30.0, float(self._poll_timeout) + 5.0)
+        try:
+            with urllib.request.urlopen(req, timeout=wait) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Telegram API request failed: {exc}") from exc
+
+        if not payload.get("ok"):
+            raise RuntimeError(f"Telegram API error: {payload}")
+        return payload
+
+    def poll(self) -> list[InboundMessage]:
+        params: dict[str, Any] = {"timeout": self._poll_timeout}
+        if self._offset is not None:
+            params["offset"] = self._offset
+
+        # getUpdates accepts query params; POST JSON also works on Bot API.
+        url = self._url("getUpdates")
+        query = urllib.parse.urlencode(params)
+        full_url = f"{url}?{query}"
+        req = urllib.request.Request(
+            full_url,
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        wait = max(30.0, float(self._poll_timeout) + 5.0)
+        try:
+            with urllib.request.urlopen(req, timeout=wait) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Telegram API request failed: {exc}") from exc
+
+        if not payload.get("ok"):
+            raise RuntimeError(f"Telegram API error: {payload}")
+
+        messages: list[InboundMessage] = []
+        for update in payload.get("result") or []:
+            update_id = update.get("update_id")
+            if isinstance(update_id, int):
+                self._offset = update_id + 1
+
+            message = update.get("message") or update.get("edited_message")
+            if not isinstance(message, dict):
+                continue
+            text = message.get("text")
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            if not text or chat_id is None:
+                continue
+            messages.append(
+                InboundMessage(chat_id=chat_id, text=str(text), raw=update)
+            )
+        return messages
+
+    def send(self, chat_id: int | str, text: str) -> None:
+        self._request(
+            "sendMessage",
+            {"chat_id": chat_id, "text": text},
+            timeout=60.0,
+        )
