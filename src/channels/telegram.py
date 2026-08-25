@@ -10,6 +10,37 @@ from typing import Any
 
 from .base import InboundMessage
 
+# Telegram Bot API limit for sendMessage text.
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
+def _chunk_text(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
+    """Split text into chunks of at most `limit` characters.
+
+    Prefers breaks after newlines, then spaces; hard-splits only when needed.
+    Joining the returned chunks recreates the original string.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        if length - start <= limit:
+            chunks.append(text[start:])
+            break
+        end = start + limit
+        window = text[start:end]
+        rel = window.rfind("\n")
+        if rel <= 0:
+            rel = window.rfind(" ")
+        if rel > 0:
+            end = start + rel + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
 
 class TelegramChannel:
     """Long-polling Telegram channel (`getUpdates` / `sendMessage`)."""
@@ -110,8 +141,9 @@ class TelegramChannel:
         return messages
 
     def send(self, chat_id: int | str, text: str) -> None:
-        self._request(
-            "sendMessage",
-            {"chat_id": chat_id, "text": text},
-            timeout=60.0,
-        )
+        for chunk in _chunk_text(text):
+            self._request(
+                "sendMessage",
+                {"chat_id": chat_id, "text": chunk},
+                timeout=60.0,
+            )

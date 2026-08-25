@@ -192,6 +192,41 @@ class TelegramChannelTests(unittest.TestCase):
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body, {"chat_id": 55, "text": "reply text"})
 
+    def test_send_splits_long_messages(self) -> None:
+        from src.channels.telegram import TELEGRAM_MAX_MESSAGE_LENGTH, _chunk_text
+
+        long_text = ("line\n" * 1000)  # well over 4096
+        chunks = _chunk_text(long_text)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), long_text)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), TELEGRAM_MAX_MESSAGE_LENGTH)
+            self.assertTrue(chunk.endswith("\n") or chunk is chunks[-1])
+
+        channel = TelegramChannel("tok")
+        fake_resp = mock.MagicMock()
+        fake_resp.read.return_value = json.dumps({"ok": True, "result": {}}).encode(
+            "utf-8"
+        )
+        fake_resp.__enter__.return_value = fake_resp
+        fake_resp.__exit__.return_value = False
+
+        oversized = "x" * (TELEGRAM_MAX_MESSAGE_LENGTH + 100)
+        with mock.patch(
+            "src.channels.telegram.urllib.request.urlopen",
+            return_value=fake_resp,
+        ) as urlopen:
+            channel.send(55, oversized)
+
+        self.assertEqual(urlopen.call_count, 2)
+        texts = [
+            json.loads(call.args[0].data.decode("utf-8"))["text"]
+            for call in urlopen.call_args_list
+        ]
+        self.assertEqual("".join(texts), oversized)
+        for text in texts:
+            self.assertLessEqual(len(text), TELEGRAM_MAX_MESSAGE_LENGTH)
+
     def test_poll_raises_on_http_error(self) -> None:
         channel = TelegramChannel("tok", poll_timeout=1)
         err = HTTPError(
