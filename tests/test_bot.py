@@ -5,10 +5,13 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
+from src.agent import Agent
 from src.channels.base import InboundMessage
 from src.channels.telegram import TelegramChannel
 from src.config import load_settings
@@ -38,6 +41,10 @@ class FakeInference:
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.reply
+
+
+def _agent(inference: object, store: Path) -> Agent:
+    return Agent(inference, chat_store_dir=store)  # type: ignore[arg-type]
 
 
 class ConfigTests(unittest.TestCase):
@@ -79,15 +86,25 @@ class ConfigTests(unittest.TestCase):
 
 
 class OrchestratorTests(unittest.TestCase):
-    def test_handle_message_is_stateless_one_shot(self) -> None:
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.store = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_handle_message_routes_through_agent(self) -> None:
         channel = FakeChannel()
         inference = FakeInference(reply="pong")
-        orch = Orchestrator(channel, inference)
+        orch = Orchestrator(channel, _agent(inference, self.store))
 
         orch.handle_message(InboundMessage(chat_id=1, text="hello"))
         orch.handle_message(InboundMessage(chat_id=1, text="again"))
 
-        self.assertEqual(inference.prompts, ["hello", "again"])
+        self.assertEqual(len(inference.prompts), 2)
+        self.assertIn("hello", inference.prompts[0])
+        self.assertIn("again", inference.prompts[1])
+        self.assertIn("hello", inference.prompts[1])
         self.assertEqual(channel.sent, [(1, "pong"), (1, "pong")])
 
     def test_run_once_polls_and_replies(self) -> None:
@@ -98,12 +115,14 @@ class OrchestratorTests(unittest.TestCase):
             ]
         )
         inference = FakeInference(reply="ok")
-        orch = Orchestrator(channel, inference)
+        orch = Orchestrator(channel, _agent(inference, self.store))
 
         handled = orch.run_once()
 
         self.assertEqual(handled, 2)
-        self.assertEqual(inference.prompts, ["hi", "yo"])
+        self.assertEqual(len(inference.prompts), 2)
+        self.assertIn("hi", inference.prompts[0])
+        self.assertIn("yo", inference.prompts[1])
         self.assertEqual(channel.sent, [(42, "ok"), (7, "ok")])
 
     def test_run_once_continues_after_handler_error(self) -> None:
@@ -116,11 +135,11 @@ class OrchestratorTests(unittest.TestCase):
 
         class FlakyInference:
             def generate(self, prompt: str) -> str:
-                if prompt == "bad":
+                if "bad" in prompt and "good" not in prompt:
                     raise RuntimeError("boom")
                 return "fine"
 
-        orch = Orchestrator(channel, FlakyInference())
+        orch = Orchestrator(channel, _agent(FlakyInference(), self.store))
         with self.assertLogs("src.orchestrator", level="ERROR"):
             handled = orch.run_once()
 
@@ -136,24 +155,51 @@ class OrchestratorTests(unittest.TestCase):
         )
         inference = FakeInference(reply="pong")
         orch = Orchestrator(
-            channel, inference, allowed_chat_ids=frozenset({"111"})
+            channel,
+            _agent(inference, self.store),
+            allowed_chat_ids=frozenset({"111"}),
         )
 
         with self.assertLogs("src.orchestrator", level="WARNING"):
             orch.run_once()
 
-        self.assertEqual(inference.prompts, ["ok"])
+        self.assertEqual(len(inference.prompts), 1)
+        self.assertIn("ok", inference.prompts[0])
         self.assertEqual(channel.sent, [(111, "pong")])
 
     def test_empty_allowlist_allows_all(self) -> None:
         channel = FakeChannel([InboundMessage(chat_id=42, text="hi")])
         inference = FakeInference(reply="pong")
-        orch = Orchestrator(channel, inference, allowed_chat_ids=frozenset())
+        orch = Orchestrator(
+            channel,
+            _agent(inference, self.store),
+            allowed_chat_ids=frozenset(),
+        )
 
         orch.run_once()
 
-        self.assertEqual(inference.prompts, ["hi"])
+        self.assertEqual(len(inference.prompts), 1)
+        self.assertIn("hi", inference.prompts[0])
         self.assertEqual(channel.sent, [(42, "pong")])
+
+
+class AgentSeamTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.store = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_handle_returns_inference_reply(self) -> None:
+        inference = FakeInference(reply="model-reply")
+        agent = Agent(inference, chat_store_dir=self.store)
+
+        reply = agent.handle(chat_id=1, text="hello")
+
+        self.assertEqual(reply, "model-reply")
+        self.assertEqual(len(inference.prompts), 1)
+        self.assertIn("hello", inference.prompts[0])
 
 
 class TelegramChannelTests(unittest.TestCase):

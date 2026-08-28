@@ -1,11 +1,11 @@
-"""Inbound text → inference → channel reply (no memory)."""
+"""Inbound text → Agent → channel reply (allowlist at this seam)."""
 
 from __future__ import annotations
 
 import logging
 
+from .agent import Agent
 from .channels.base import Channel, InboundMessage
-from .inference.base import Inference
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +14,12 @@ class Orchestrator:
     def __init__(
         self,
         channel: Channel,
-        inference: Inference,
+        agent: Agent,
         *,
         allowed_chat_ids: frozenset[str] | None = None,
     ) -> None:
         self._channel = channel
-        self._inference = inference
+        self._agent = agent
         # None/empty = allow all chats (backward-compatible default).
         self._allowed_chat_ids = allowed_chat_ids or frozenset()
 
@@ -35,7 +35,7 @@ class Orchestrator:
                 message.chat_id,
             )
             return
-        reply = self._inference.generate(message.text)
+        reply = self._agent.handle(message.chat_id, message.text)
         self._channel.send(message.chat_id, reply)
 
     def run_once(self) -> int:
@@ -51,6 +51,6 @@ class Orchestrator:
         return len(messages)
 
     def run(self) -> None:
-        logger.info("Orchestrator started (stateless one-shot replies)")
+        logger.info("Orchestrator started (allowlist → Agent → send)")
         while True:
             self.run_once()

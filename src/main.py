@@ -11,6 +11,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from src.agent import Agent
 from src.channels.telegram import TelegramChannel
 from src.config import load_settings
 from src.inference.ollama import OllamaInference
@@ -28,9 +29,10 @@ def main() -> None:
         settings.ollama_model,
         base_url=settings.ollama_base_url,
     )
+    agent = Agent(inference)
     Orchestrator(
         channel,
-        inference,
+        agent,
         allowed_chat_ids=settings.telegram_allowed_chat_ids,
     ).run()
 

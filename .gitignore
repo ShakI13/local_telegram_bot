@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Durable Chat Store (runtime agent state)
+.scratch/chats/
+
 # Spyder project settings
 .spyderproject
 .spyproject
