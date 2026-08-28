@@ -90,6 +90,8 @@ class AllowlistedExecRunner:
                 cwd=str(self._cwd.resolve()),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._timeout,
                 shell=False,
                 check=False,

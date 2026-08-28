@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +194,40 @@ class AgenticLoopSkillTests(AgentTestCase):
         self.assertEqual(agent.handle(1, "hi"), "Just a normal reply.")
         self.assertEqual(len(inference.prompts), 1)
 
+    def test_tool_narration_without_tags_is_nudged_then_recovers(self) -> None:
+        (self.skills / "wttr.md").write_text(
+            "# wttr\n\nUse curl for wttr.in.\n",
+            encoding="utf-8",
+        )
+        calls: list[str] = []
+
+        def fake_exec(command: str) -> str:
+            calls.append(command)
+            return "exit_code=0\nstdout:\nMoscow: +15C\nstderr:\n"
+
+        narration = (
+            "Loading skill 'wttr' to fetch weather data.\n"
+            "Running CLI command: `curl -s wttr.in/moscow`\n"
+            "Result: ` ☁️ 15°C`\n\n"
+            "Final answer: Сегодня в Москве 15°C."
+        )
+        inference = ScriptedInference(
+            [
+                narration,
+                "<skill>wttr</skill>",
+                '<exec>curl.exe -s "https://wttr.in/Moscow?format=3"</exec>',
+                "Сегодня в Москве +15C.",
+            ]
+        )
+        agent = self._agent(inference, exec_runner=fake_exec)
+
+        reply = agent.handle(1, "Какая погода в Москве ?")
+
+        self.assertEqual(reply, "Сегодня в Москве +15C.")
+        self.assertEqual(len(inference.prompts), 4)
+        self.assertIn("protocol violation", inference.prompts[1].lower())
+        self.assertEqual(len(calls), 1)
+
     def test_max_steps_stops_loop_with_clear_message(self) -> None:
         inference = ScriptedInference(
             ["<skill>nope</skill>"] * 20
@@ -314,6 +349,27 @@ class AllowlistedExecTests(AgentTestCase):
         self.assertEqual(agent.handle(1, "empty exec"), "Recovered from empty exec.")
         self.assertIn("error", inference.prompts[1].lower())
 
+    def test_exec_decodes_utf8_stdout(self) -> None:
+        from src.exec_runner import AllowlistedExecRunner
+
+        fake = subprocess.CompletedProcess(
+            args=["curl.exe", "-s", "https://wttr.in/Moscow?format=3"],
+            returncode=0,
+            stdout="Moscow: ☁️ +15°C\n",
+            stderr="",
+        )
+        with mock.patch(
+            "src.exec_runner.subprocess.run", return_value=fake
+        ) as mock_run:
+            result = AllowlistedExecRunner(cwd=self.store, timeout=1).run(
+                'curl.exe -s "https://wttr.in/Moscow?format=3"'
+            )
+
+        self.assertIn("☁️", result)
+        self.assertIn("+15°C", result)
+        self.assertEqual(mock_run.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertEqual(mock_run.call_args.kwargs.get("errors"), "replace")
+
 
 class ContextBudgetTests(AgentTestCase):
     def test_over_budget_summarizes_older_keeps_recent(self) -> None:
@@ -330,7 +386,7 @@ class ContextBudgetTests(AgentTestCase):
         inference = ScriptedInference(["ack1", "ack2", "final"])
         agent = self._agent(
             inference,
-            context_budget=900,
+            context_budget=1500,
             recent_keep=2,
             summarizer=fake_summarizer,
         )
@@ -368,7 +424,7 @@ class ContextBudgetTests(AgentTestCase):
         inference = ScriptedInference(["still ok"])
         agent = self._agent(
             inference,
-            context_budget=700,
+            context_budget=1300,
             recent_keep=4,
             summarizer=lambda blob: blob,  # should not need to fold more
         )

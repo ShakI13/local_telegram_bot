@@ -45,15 +45,46 @@ Tool Protocol (emit exactly one tool request per step, or a final answer):
 - Run an allowlisted CLI command: <exec>command</exec>
 - Final answer to the user: plain text with no tool tags.
 
+Rules:
+- Never narrate tool use. Do not write "Loading skill", "Running command", or fake "Result:" text.
+- Never invent tool results. If you need data, emit a tool tag and stop.
+- When you need a tool, your entire reply must be ONLY the tag (nothing else).
+- Only curl.exe is allowed for exec.
+
+Examples of valid tool steps (entire reply):
+<skill>wttr</skill>
+
+<exec>curl.exe -s "https://wttr.in/Moscow?format=3"</exec>
+
+Example final answer (after tool results already appear in the conversation):
+Berlin is 4C and cloudy.
+
 Available skills are listed in the Skill Catalog below. Load a skill before using it.
-Only curl.exe is allowed for exec.
 """
+
+PROTOCOL_NUDGE = (
+    "Tool error: protocol violation. Your previous message narrated tool use "
+    "instead of emitting tags. Emit exactly one tag now "
+    "(<skill>name</skill> or <exec>command</exec>), or a plain final answer "
+    "with no invented tool results."
+)
 
 Summarizer = Callable[[str], str]
 ExecRunner = Callable[[str], str]
 
 _ANY_TOOL_RE = re.compile(
     r"<(skill|exec)>.*?</\1>", re.DOTALL | re.IGNORECASE
+)
+# Prose that fakes a tool trajectory without XML tags (common on tiny models).
+_TOOL_NARRATION_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"loading\s+skill|"
+    r"running\s+(?:cli\s+)?command|"
+    r"final\s+answer\s*:|"
+    r"result\s*:\s*`|"
+    r"`curl(?:\.exe)?\b"
+    r")"
 )
 
 
@@ -175,12 +206,34 @@ class Agent:
 
             tools = self._parse_tools(model_text)
             if not tools:
+                if self._looks_like_tool_narration(model_text):
+                    logger.info(
+                        "agentic loop step=%d/%d outcome=protocol_nudge "
+                        "reply_chars=%d preview=%r",
+                        step,
+                        self._max_steps,
+                        len(model_text),
+                        _preview(model_text),
+                    )
+                    chat["messages"].append(
+                        {"role": "tool", "content": PROTOCOL_NUDGE}
+                    )
+                    continue
+                logger.info(
+                    "agentic loop step=%d/%d outcome=final_answer "
+                    "reply_chars=%d preview=%r",
+                    step,
+                    self._max_steps,
+                    len(model_text),
+                    _preview(model_text),
+                )
                 return model_text.strip() or model_text
 
             # One tool per model step (further tags ignored until the next step).
             kind, body = tools[0]
             logger.info(
-                "agentic loop step=%d/%d tool=%s body_chars=%d preview=%r",
+                "agentic loop step=%d/%d outcome=tool tool=%s "
+                "body_chars=%d preview=%r",
                 step,
                 self._max_steps,
                 kind,
@@ -256,6 +309,9 @@ class Agent:
         if not tools:
             return [("error", "")]
         return tools
+
+    def _looks_like_tool_narration(self, model_text: str) -> bool:
+        return bool(_TOOL_NARRATION_RE.search(model_text))
 
     def _dispatch_tool(self, kind: str, body: str) -> str:
         if kind == "skill":
