@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,8 +12,18 @@ from typing import Any
 
 from .base import InboundMessage
 
+logger = logging.getLogger(__name__)
+
 # Telegram Bot API limit for sendMessage text.
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+_LOG_PREVIEW_CHARS = 200
+
+
+def _preview(text: str, limit: int = _LOG_PREVIEW_CHARS) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
 
 
 def _chunk_text(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
@@ -81,17 +93,42 @@ class TelegramChannel:
             req = urllib.request.Request(url, headers=headers, method="GET")
 
         wait = timeout if timeout is not None else max(30.0, float(self._poll_timeout) + 5.0)
+        logger.info("telegram %s start", method)
+        started = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=wait) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            logger.info(
+                "telegram %s HTTP %s after %.0fms detail_preview=%r",
+                method,
+                exc.code,
+                (time.perf_counter() - started) * 1000,
+                _preview(detail),
+            )
             raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
+            logger.info(
+                "telegram %s URLError after %.0fms: %s",
+                method,
+                (time.perf_counter() - started) * 1000,
+                exc,
+            )
             raise RuntimeError(f"Telegram API request failed: {exc}") from exc
 
         if not payload.get("ok"):
+            logger.info(
+                "telegram %s API not ok payload_preview=%r",
+                method,
+                _preview(str(payload)),
+            )
             raise RuntimeError(f"Telegram API error: {payload}")
+        logger.info(
+            "telegram %s done ms=%.0f",
+            method,
+            (time.perf_counter() - started) * 1000,
+        )
         return payload
 
     def poll(self) -> list[InboundMessage]:
@@ -109,16 +146,33 @@ class TelegramChannel:
             method="GET",
         )
         wait = max(30.0, float(self._poll_timeout) + 5.0)
+        logger.info("telegram getUpdates start offset=%s", self._offset)
+        started = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=wait) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            logger.info(
+                "telegram getUpdates HTTP %s after %.0fms detail_preview=%r",
+                exc.code,
+                (time.perf_counter() - started) * 1000,
+                _preview(detail),
+            )
             raise RuntimeError(f"Telegram API HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
+            logger.info(
+                "telegram getUpdates URLError after %.0fms: %s",
+                (time.perf_counter() - started) * 1000,
+                exc,
+            )
             raise RuntimeError(f"Telegram API request failed: {exc}") from exc
 
         if not payload.get("ok"):
+            logger.info(
+                "telegram getUpdates API not ok payload_preview=%r",
+                _preview(str(payload)),
+            )
             raise RuntimeError(f"Telegram API error: {payload}")
 
         messages: list[InboundMessage] = []
@@ -138,10 +192,23 @@ class TelegramChannel:
             messages.append(
                 InboundMessage(chat_id=chat_id, text=str(text), raw=update)
             )
+        logger.info(
+            "telegram getUpdates done ms=%.0f inbound=%d",
+            (time.perf_counter() - started) * 1000,
+            len(messages),
+        )
         return messages
 
     def send(self, chat_id: int | str, text: str) -> None:
-        for chunk in _chunk_text(text):
+        chunks = _chunk_text(text)
+        logger.info(
+            "telegram sendMessage chat_id=%s text_chars=%d chunks=%d preview=%r",
+            chat_id,
+            len(text),
+            len(chunks),
+            _preview(text),
+        )
+        for chunk in chunks:
             self._request(
                 "sendMessage",
                 {"chat_id": chat_id, "text": chunk},

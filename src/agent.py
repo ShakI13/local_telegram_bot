@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from .exec_runner import AllowlistedExecRunner
 from .inference.base import Inference
+
+logger = logging.getLogger(__name__)
 
 NEW_ACK = "Chat reset. Starting a fresh conversation."
 MAX_STEPS = 8
@@ -19,6 +23,20 @@ MAX_STEPS_MESSAGE = (
     "I reached my step limit without a final answer. "
     "Please try again or simplify the request."
 )
+INFERENCE_FAILURE_NOTICE = (
+    "The local model is unavailable right now. Please try again in a moment."
+)
+GENERIC_FAILURE_NOTICE = (
+    "Something went wrong handling your message. Please try again."
+)
+_LOG_PREVIEW_CHARS = 200
+
+
+def _preview(text: str, limit: int = _LOG_PREVIEW_CHARS) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
 
 TOOL_INSTRUCTIONS = """You are a helpful assistant with tools.
 
@@ -88,19 +106,71 @@ class Agent:
         # Index of this turn's user message — never fold it (or later loop rows) away.
         turn_start_index = len(chat["messages"]) - 1
 
-        final = self._run_agentic_loop(chat, turn_start_index=turn_start_index)
+        logger.info(
+            "agent.handle start chat_id=%s user_chars=%d preview=%r",
+            chat_id,
+            len(text),
+            _preview(text),
+        )
+        try:
+            final = self._run_agentic_loop(chat, turn_start_index=turn_start_index)
+        except Exception:
+            logger.info(
+                "agent.handle unexpected error chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
+            final = self._append_failure_notice(chat, GENERIC_FAILURE_NOTICE)
         self._save_chat(chat_id, chat)
+        logger.info(
+            "agent.handle done chat_id=%s reply_chars=%d preview=%r",
+            chat_id,
+            len(final),
+            _preview(final),
+        )
         return final
+
+    def _append_failure_notice(self, chat: dict[str, Any], notice: str) -> str:
+        chat["messages"].append({"role": "assistant", "content": notice})
+        return notice
 
     def _run_agentic_loop(
         self, chat: dict[str, Any], *, turn_start_index: int
     ) -> str:
-        for _ in range(self._max_steps):
+        for step in range(1, self._max_steps + 1):
             turn_start_index = self._enforce_context_budget(
                 chat, turn_start_index=turn_start_index
             )
             prompt = self._assemble_prompt(chat)
-            model_text = self._inference.generate(prompt)
+            logger.info(
+                "agentic loop step=%d/%d prompt_chars=%d preview=%r",
+                step,
+                self._max_steps,
+                len(prompt),
+                _preview(prompt),
+            )
+            started = time.perf_counter()
+            try:
+                model_text = self._inference.generate(prompt)
+            except Exception:
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                logger.info(
+                    "Inference failed at step=%d/%d after %.0fms",
+                    step,
+                    self._max_steps,
+                    elapsed_ms,
+                    exc_info=True,
+                )
+                return self._append_failure_notice(chat, INFERENCE_FAILURE_NOTICE)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                "agentic loop step=%d/%d generate_ms=%.0f reply_chars=%d preview=%r",
+                step,
+                self._max_steps,
+                elapsed_ms,
+                len(model_text),
+                _preview(model_text),
+            )
             chat["messages"].append({"role": "assistant", "content": model_text})
 
             tools = self._parse_tools(model_text)
@@ -109,7 +179,23 @@ class Agent:
 
             # One tool per model step (further tags ignored until the next step).
             kind, body = tools[0]
+            logger.info(
+                "agentic loop step=%d/%d tool=%s body_chars=%d preview=%r",
+                step,
+                self._max_steps,
+                kind,
+                len(body),
+                _preview(body),
+            )
             result = self._dispatch_tool(kind, body)
+            logger.info(
+                "agentic loop step=%d/%d tool=%s result_chars=%d preview=%r",
+                step,
+                self._max_steps,
+                kind,
+                len(result),
+                _preview(result),
+            )
             chat["messages"].append({"role": "tool", "content": result})
 
         chat["messages"].append({"role": "assistant", "content": MAX_STEPS_MESSAGE})

@@ -58,3 +58,7 @@ _Avoid_: memory compression, RAG
 **Tool Protocol**:
 Prompt-parsed XML-ish tags (not Ollama native `tool_calls`). `exec` is requested with `<exec>...</exec>`; a Skill is requested with `<skill>skill_name</skill>` (harness reads `src/skills/<skill_name>.md`). Text outside tool tags is the final user-facing answer.
 _Avoid_: function calling, native tools (rejected for v1 of the agent homework)
+
+**Turn Failure Notice**:
+A fixed assistant message persisted on the Chat (and sent to the user) when a turn cannot finish normally — e.g. Inference unavailable, or an unexpected Harness error — including any partial Agentic Loop rows already produced.
+_Avoid_: error reply (vague), exception message (raw stacks are not user-facing)

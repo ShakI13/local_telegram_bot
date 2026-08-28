@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
-from src.agent import Agent
+from src.agent import Agent, GENERIC_FAILURE_NOTICE, INFERENCE_FAILURE_NOTICE
 from src.channels.base import InboundMessage
 from src.channels.telegram import TelegramChannel
 from src.config import load_settings
@@ -140,12 +140,36 @@ class OrchestratorTests(unittest.TestCase):
                 return "fine"
 
         orch = Orchestrator(channel, _agent(FlakyInference(), self.store))
-        with self.assertLogs("src.orchestrator", level="ERROR"):
-            handled = orch.run_once()
+        handled = orch.run_once()
 
         self.assertEqual(handled, 2)
-        self.assertEqual(channel.sent, [(2, "fine")])
+        self.assertEqual(
+            channel.sent,
+            [(1, INFERENCE_FAILURE_NOTICE), (2, "fine")],
+        )
 
+    def test_run_once_sends_generic_notice_when_agent_raises(self) -> None:
+        channel = FakeChannel(
+            [
+                InboundMessage(chat_id=1, text="bad"),
+                InboundMessage(chat_id=2, text="good"),
+            ]
+        )
+
+        class RaisingAgent:
+            def handle(self, chat_id: int | str, text: str) -> str:
+                if chat_id == 1:
+                    raise RuntimeError("agent exploded")
+                return "fine"
+
+        orch = Orchestrator(channel, RaisingAgent())  # type: ignore[arg-type]
+        handled = orch.run_once()
+
+        self.assertEqual(handled, 2)
+        self.assertEqual(
+            channel.sent,
+            [(1, GENERIC_FAILURE_NOTICE), (2, "fine")],
+        )
     def test_allowlist_ignores_other_chats(self) -> None:
         channel = FakeChannel(
             [
@@ -160,9 +184,12 @@ class OrchestratorTests(unittest.TestCase):
             allowed_chat_ids=frozenset({"111"}),
         )
 
-        with self.assertLogs("src.orchestrator", level="WARNING"):
+        with self.assertLogs("src.orchestrator", level="INFO") as logs:
             orch.run_once()
 
+        self.assertTrue(
+            any("non-allowlisted" in line for line in logs.output)
+        )
         self.assertEqual(len(inference.prompts), 1)
         self.assertIn("ok", inference.prompts[0])
         self.assertEqual(channel.sent, [(111, "pong")])

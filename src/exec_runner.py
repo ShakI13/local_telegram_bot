@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 ALLOWED_BINARIES = frozenset({"curl.exe"})
+_LOG_PREVIEW_CHARS = 200
+
+
+def _preview(text: str, limit: int = _LOG_PREVIEW_CHARS) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
 
 
 class AllowlistedExecRunner:
@@ -65,6 +77,13 @@ class AllowlistedExecRunner:
         if not self._cwd.is_dir():
             self._cwd.mkdir(parents=True, exist_ok=True)
 
+        logger.info(
+            "exec start argv=%r cwd=%s timeout=%s",
+            argv,
+            self._cwd,
+            self._timeout,
+        )
+        started = time.perf_counter()
         try:
             completed = subprocess.run(
                 argv,
@@ -76,18 +95,36 @@ class AllowlistedExecRunner:
                 check=False,
             )
         except subprocess.TimeoutExpired:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.info("exec timeout after %.0fms argv=%r", elapsed_ms, argv)
             return (
                 f"Tool error: exec timed out after {self._timeout}s "
                 f"(cwd jail: {self._cwd})."
             )
         except OSError as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                "exec OSError after %.0fms argv=%r: %s",
+                elapsed_ms,
+                argv,
+                exc,
+            )
             return f"Tool error: failed to start process: {exc}"
 
-        return (
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        result = (
             f"exit_code={completed.returncode}\n"
             f"stdout:\n{completed.stdout}\n"
             f"stderr:\n{completed.stderr}"
         )
+        logger.info(
+            "exec done ms=%.0f exit_code=%s result_chars=%d preview=%r",
+            elapsed_ms,
+            completed.returncode,
+            len(result),
+            _preview(result),
+        )
+        return result
 
 
 def _looks_like_path_escape(arg: str) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from .agent import Agent
+from .agent import GENERIC_FAILURE_NOTICE, Agent
 from .channels.base import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
@@ -30,13 +30,23 @@ class Orchestrator:
 
     def handle_message(self, message: InboundMessage) -> None:
         if not self._is_allowed(message.chat_id):
-            logger.warning(
+            logger.info(
                 "Ignoring message from non-allowlisted chat_id=%s",
                 message.chat_id,
             )
             return
+        logger.info(
+            "orchestrator inbound chat_id=%s text_chars=%d",
+            message.chat_id,
+            len(message.text),
+        )
         reply = self._agent.handle(message.chat_id, message.text)
         self._channel.send(message.chat_id, reply)
+        logger.info(
+            "orchestrator sent chat_id=%s reply_chars=%d",
+            message.chat_id,
+            len(reply),
+        )
 
     def run_once(self) -> int:
         """Poll once and process all inbound messages. Returns how many were handled."""
@@ -45,9 +55,19 @@ class Orchestrator:
             try:
                 self.handle_message(message)
             except Exception:
-                logger.exception(
-                    "Failed to handle message for chat_id=%s", message.chat_id
+                logger.info(
+                    "Failed to handle message for chat_id=%s; sending backstop reply",
+                    message.chat_id,
+                    exc_info=True,
                 )
+                try:
+                    self._channel.send(message.chat_id, GENERIC_FAILURE_NOTICE)
+                except Exception:
+                    logger.info(
+                        "Failed to send backstop reply for chat_id=%s",
+                        message.chat_id,
+                        exc_info=True,
+                    )
         return len(messages)
 
     def run(self) -> None:

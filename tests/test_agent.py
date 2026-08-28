@@ -8,7 +8,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src.agent import Agent, MAX_STEPS_MESSAGE
+from src.agent import (
+    Agent,
+    GENERIC_FAILURE_NOTICE,
+    INFERENCE_FAILURE_NOTICE,
+    MAX_STEPS_MESSAGE,
+)
 
 
 class ScriptedInference:
@@ -389,6 +394,68 @@ class ContextBudgetTests(AgentTestCase):
             summarizer=boom,
         )
         self.assertEqual(agent.handle(1, "hi"), "short")
+
+
+class TurnFailureNoticeTests(AgentTestCase):
+    def test_inference_failure_returns_notice_and_persists_chat(self) -> None:
+        class BoomInference:
+            def generate(self, prompt: str) -> str:
+                raise RuntimeError("Ollama request failed: connection refused")
+
+        agent = self._agent(BoomInference())
+        reply = agent.handle(42, "Какая погода в Москве ?")
+
+        self.assertEqual(reply, INFERENCE_FAILURE_NOTICE)
+        data = json.loads((self.store / "42.json").read_text(encoding="utf-8"))
+        messages = data["messages"]
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertEqual(messages[0]["content"], "Какая погода в Москве ?")
+        self.assertEqual(messages[-1]["role"], "assistant")
+        self.assertEqual(messages[-1]["content"], INFERENCE_FAILURE_NOTICE)
+
+    def test_inference_failure_keeps_partial_loop_rows(self) -> None:
+        (self.skills / "wttr.md").write_text("# wttr\n\nWeather.\n", encoding="utf-8")
+
+        class PartialThenBoom:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def generate(self, prompt: str) -> str:
+                self.n += 1
+                if self.n == 1:
+                    return "<skill>wttr</skill>"
+                raise RuntimeError("Ollama request failed")
+
+        agent = self._agent(PartialThenBoom())
+        reply = agent.handle(1, "weather please")
+
+        self.assertEqual(reply, INFERENCE_FAILURE_NOTICE)
+        data = json.loads((self.store / "1.json").read_text(encoding="utf-8"))
+        roles = [m["role"] for m in data["messages"]]
+        self.assertEqual(roles[0], "user")
+        self.assertIn("assistant", roles[1:-1])
+        self.assertIn("tool", roles[1:-1])
+        self.assertEqual(data["messages"][-1]["content"], INFERENCE_FAILURE_NOTICE)
+
+    def test_unexpected_error_returns_generic_notice_and_persists(self) -> None:
+        class ExplodingBudgetAgent(Agent):
+            def _enforce_context_budget(
+                self, chat: dict, *, turn_start_index: int
+            ) -> int:
+                raise RuntimeError("budget boom")
+
+        inference = ScriptedInference(["should-not-run"])
+        agent = ExplodingBudgetAgent(
+            inference,
+            chat_store_dir=self.store,
+            skills_dir=self.skills,
+        )
+        reply = agent.handle(7, "hello")
+
+        self.assertEqual(reply, GENERIC_FAILURE_NOTICE)
+        data = json.loads((self.store / "7.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["messages"][0]["content"], "hello")
+        self.assertEqual(data["messages"][-1]["content"], GENERIC_FAILURE_NOTICE)
 
 
 if __name__ == "__main__":
